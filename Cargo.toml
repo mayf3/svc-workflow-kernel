@@ -73,6 +73,8 @@ sqlx = { version = "0.8", features = [
     "chrono",
 ] }
 rand = "0.8"
+rsa = "0.9"
+base64 = "0.22"
 
 [profile.dev]
 opt-level = 0

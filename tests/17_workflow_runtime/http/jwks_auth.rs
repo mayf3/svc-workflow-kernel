@@ -5,9 +5,14 @@
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use base64::Engine as _;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
+use rsa::traits::PublicKeyParts;
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -20,11 +25,35 @@ use super::*;
 
 // ---------------------------------------------------------------------------
 // Test RSA key material (2048-bit)
+//
+// The key is generated at runtime and cached, so no private key material is
+// committed to the repository.
 // ---------------------------------------------------------------------------
 
-const TEST_RSA_N: &str = "zLFR5xYtoavfN3HKTpix5__zi4MXpiWYQAqa__FHkONKDj14yFnk9DV2QMcc6v_jCYqWD8arZ39oNPNz9mtEthOScwv-ORQQh3JxcCltZsgDTdzPsXpN61wkcWVU9fgaWjdQBssL3D1cd3vBLyYYb0qVkXFtwmf2r_s9PjrbtViQPuG9Xhh-L5pGfLsptN3C2-K8vy9I6A-R4YdD3pLdue-X5P3gQObbxLiLzekdR_ZTNsNCukqksj_JxcdVIxwuatg6OYuOPhyGEZb6kedoaJMqLxmCF5lEse_pNaDFOuIIt01hflru9ibhnZ0KK1-7351Flef6xf7JzatGIWmreQ";
-const TEST_RSA_E: &str = "AQAB";
-const TEST_RSA_PRIVATE_KEY_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\nMIIEogIBAAKCAQEAzLFR5xYtoavfN3HKTpix5//zi4MXpiWYQAqa//FHkONKDj14\nyFnk9DV2QMcc6v/jCYqWD8arZ39oNPNz9mtEthOScwv+ORQQh3JxcCltZsgDTdzP\nsXpN61wkcWVU9fgaWjdQBssL3D1cd3vBLyYYb0qVkXFtwmf2r/s9PjrbtViQPuG9\nXhh+L5pGfLsptN3C2+K8vy9I6A+R4YdD3pLdue+X5P3gQObbxLiLzekdR/ZTNsNC\nukqksj/JxcdVIxwuatg6OYuOPhyGEZb6kedoaJMqLxmCF5lEse/pNaDFOuIIt01h\nflru9ibhnZ0KK1+7351Flef6xf7JzatGIWmreQIDAQABAoIBAAkSvxeoMwOck7to\nbthHCnPHM6t2dyDlP7dvAOnhbxOsD4dMEEOJQI3WpNRAPzbnes/cdcRjQQvIaP0X\n4YcFwDj16yLwYCd1jToDx6V6IKBSs1rLM+WhDz0ki3T/UeHJSpm/I+v5KiBsE+Iz\n+R826BRe0Pxuc7gPVa79SvysLTr/iq1dE545W0UEC1bAqXc2sJfaIFa10xIG3Gmk\nV46FW+8rZIzAmuR7OA1lWSG4f45m4x78/LgF/gb4xoXOG/NAB9d+hgq/NI0M+JxU\nAackLa9V2T4ECs8lUSuUek8XFgEiSAXQDr9dH3cbrCUR69AjHsVtJQlkli69GXKG\nmWjk9AECgYEA7tfZtZ73LfAcAkG7EWMzbI1yXKkRtzdiKT1EgrbfsPU7GwpwRqxO\nTW9P8ZmKvh5Npi5t0+QpMgQGGTbuI1LLO9EDP/oiOXI9DZtNEYeSa4zNoiKWKkMl\noPs2i4/kUNNPqMBW/JnRmoapM/9GWAv7xYjhw+tYVUrf6S2jnWHOGfkCgYEA22V3\ngjZdMblt2B7M9sE3cMixCp7elG9iM0hH77JThTK+NMFslbIE/VDKdifjPPq85fi5\n64fm7eGH5nBNRn2+6xBqH8PAdaTgSyPWpVkhL6kkNrjyTnjhPOHZAxgWEYKZw3LE\n/s7ej4vazYrE8voIJSwtDrSNZIFDsmShWlzgfYECgYBPJE8Lk4UsP6fIR6eI92oO\nyj/e3Fb2cu+f4qFU/uvYYyoWp7rUcDvyBLRkxg/nN3tbWX8i+zN7U0ICEOWP5ttZ\nEsUU6fl1N5lrbM54xIeMA7gPxY4kquNJGHTWgfORpLN8o18vjHibz4s5o5jXjAD9\nT4IfvVgjyw+u4GSavdHhYQKBgBTxaqcTaXIFsWagChDEAPbTMZNB9x1URJuAmt1W\nuIJOhbmjfSoNBEzqGWmOBTMc/Es3owfIwVKT5NUqgzXnawIlXvwJQ6X3RzHlCehe\nybwy+TIAFaFICLg3FvAkrHafcO4nVoa8WKJ7Rze3t3U6SOzDesmckqK1dDDjSkPF\n+egBAoGAV9k+JQZzLc5+XJgsm8htUS2b0MOipCaABLf8P6IISyiE3ccvEECuwjfS\nBHgT+w1o5NF/c1zANedBtHmfk5XIvrf/OWzXhEGSWXhBrn2LLPCuh1OOHDQlKvff\nqIPymQBoF0zFpZdyAbKy7b8/fji7yG0vXceAa3jO4xSn6eYhGPQ=\n-----END RSA PRIVATE KEY-----\n";
+fn test_rsa_key() -> &'static RsaPrivateKey {
+    static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut rng = rand::thread_rng();
+        RsaPrivateKey::new(&mut rng, 2048).expect("failed to generate test RSA key")
+    })
+}
+
+fn test_rsa_private_key_pem() -> String {
+    test_rsa_key()
+        .to_pkcs1_pem(LineEnding::LF)
+        .expect("failed to encode test RSA private key")
+        .to_string()
+}
+
+fn test_rsa_n() -> String {
+    let pub_key: RsaPublicKey = test_rsa_key().into();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pub_key.n().to_bytes_be())
+}
+
+fn test_rsa_e() -> String {
+    let pub_key: RsaPublicKey = test_rsa_key().into();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pub_key.e().to_bytes_be())
+}
 
 const JWKS_KID: &str = "test-key-1";
 
@@ -85,7 +114,7 @@ fn rs256_token(
     };
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(JWKS_KID.to_string());
-    let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+    let key = EncodingKey::from_rsa_pem(test_rsa_private_key_pem().as_bytes()).unwrap();
     encode(&header, &claims, &key).unwrap()
 }
 
@@ -109,7 +138,7 @@ fn rs256_token_nbf_future(subject: Uuid, scope: &str, principal_type: &str) -> S
     };
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(JWKS_KID.to_string());
-    let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+    let key = EncodingKey::from_rsa_pem(test_rsa_private_key_pem().as_bytes()).unwrap();
     encode(&header, &claims, &key).unwrap()
 }
 
@@ -137,8 +166,8 @@ impl MockJwksServer {
                 "use": "sig",
                 "alg": "RS256",
                 "kid": JWKS_KID,
-                "n": TEST_RSA_N,
-                "e": TEST_RSA_E,
+                "n": test_rsa_n(),
+                "e": test_rsa_e(),
             }]
         })
         .to_string();
@@ -430,7 +459,7 @@ async fn missing_kid_rejected() {
     let token = encode(
         &Header::new(Algorithm::RS256),
         &claims,
-        &EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap(),
+        &EncodingKey::from_rsa_pem(test_rsa_private_key_pem().as_bytes()).unwrap(),
     )
     .unwrap();
     let result = verify_token(&state, &token).await;
@@ -447,7 +476,7 @@ async fn wrong_issuer_and_audience_rejected() {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+    let key = EncodingKey::from_rsa_pem(test_rsa_private_key_pem().as_bytes()).unwrap();
     let now = chrono::Utc::now().timestamp() as usize;
 
     let claims = json!({
@@ -494,7 +523,7 @@ async fn expired_token_rejected() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let now = chrono::Utc::now().timestamp() as usize;
-    let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+    let key = EncodingKey::from_rsa_pem(test_rsa_private_key_pem().as_bytes()).unwrap();
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(JWKS_KID.to_string());
     let claims = json!({
@@ -540,7 +569,7 @@ async fn non_uuid_sub_rejected() {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let now = chrono::Utc::now().timestamp() as usize;
-    let key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_KEY_PEM.as_bytes()).unwrap();
+    let key = EncodingKey::from_rsa_pem(test_rsa_private_key_pem().as_bytes()).unwrap();
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(JWKS_KID.to_string());
     let claims = json!({
